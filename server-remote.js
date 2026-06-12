@@ -14,6 +14,9 @@ import http from 'http';
 const CLIENT_ID     = process.env.TRAKT_CLIENT_ID;
 const CLIENT_SECRET = process.env.TRAKT_CLIENT_SECRET;
 const MCP_SECRET    = process.env.MCP_SECRET;
+const TMDB_API_KEY  = process.env.TMDB_API_KEY || '';
+// Plataformas del usuario en Argentina (matchea contra provider_name de TMDB)
+const MY_PLATFORMS  = ['netflix', 'disney plus', 'disney+', 'apple tv', 'max', 'hbo max', 'amazon prime video', 'prime video'];
 const PORT          = process.env.PORT || 4237;
 const BASE_URL      = 'https://api.trakt.tv';
 const UA            = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) trakt-mcp/1.0';
@@ -162,6 +165,56 @@ async function getTraktRecommendations(type) {
   return data.map(item => type === 'shows' ? fmtShow(item) : fmtMovie(item));
 }
 
+// ── TMDB: disponibilidad de streaming en Argentina ───────────────────────────
+
+async function tmdbGet(endpoint, params = '') {
+  if (!TMDB_API_KEY) throw new Error('TMDB_API_KEY no configurada en las variables de entorno.');
+  const res = await fetch(`https://api.themoviedb.org/3${endpoint}?api_key=${TMDB_API_KEY}${params}`, {
+    headers: { 'User-Agent': UA },
+  });
+  if (!res.ok) throw new Error(`TMDB API ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+function matchPlatform(providerName) {
+  const p = providerName.toLowerCase();
+  return MY_PLATFORMS.some(mine => p.includes(mine) || mine.includes(p));
+}
+
+async function checkAvailability(title, type, year) {
+  const kind = type === 'show' ? 'tv' : 'movie';
+  const yearParam = year ? (kind === 'movie' ? `&year=${year}` : `&first_air_date_year=${year}`) : '';
+  const search = await tmdbGet(`/search/${kind}`, `&query=${encodeURIComponent(title)}${yearParam}`);
+  const hit = search.results?.[0];
+  if (!hit) return { title, type, encontrado: false };
+
+  const providers = await tmdbGet(`/${kind}/${hit.id}/watch/providers`);
+  const ar = providers.results?.AR;
+  const flatrate = (ar?.flatrate || []).map(p => p.provider_name);
+  const enMisPlataformas = flatrate.filter(matchPlatform);
+
+  return {
+    title: hit.title || hit.name,
+    type,
+    encontrado: true,
+    disponible_en_mis_plataformas: enMisPlataformas.length > 0,
+    mis_plataformas: enMisPlataformas,
+    todas_las_plataformas_ar: flatrate,
+  };
+}
+
+async function getAvailability(titles) {
+  const results = [];
+  for (const item of titles) {
+    try {
+      results.push(await checkAvailability(item.title, item.type || 'movie', item.year));
+    } catch (err) {
+      results.push({ title: item.title, error: err.message });
+    }
+  }
+  return results;
+}
+
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -206,10 +259,32 @@ const TOOLS = [
   },
   {
     name: 'trakt_recommendations',
-    description: 'Recomendaciones personalizadas de Trakt basadas en el historial. Ya filtradas — no incluye lo visto.',
+    description: 'Recomendaciones personalizadas de Trakt basadas en el historial. Ya filtradas — no incluye lo visto. IMPORTANTE: antes de recomendar al usuario, verificar disponibilidad con streaming_availability y solo recomendar lo que este en sus plataformas.',
     inputSchema: {
       type: 'object',
       properties: { type: { type: 'string', enum: ['movies', 'shows'] } },
+    },
+  },
+  {
+    name: 'streaming_availability',
+    description: 'Verifica en que plataformas de streaming de ARGENTINA esta disponible cada titulo, y si esta en las plataformas del usuario (Netflix, Disney+, Apple TV+, HBO Max, Prime Video). SIEMPRE usar antes de recomendar: solo recomendar titulos con disponible_en_mis_plataformas=true. Acepta varios titulos por llamada.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        titles: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              type:  { type: 'string', enum: ['movie', 'show'] },
+              year:  { type: 'number' },
+            },
+            required: ['title'],
+          },
+        },
+      },
+      required: ['titles'],
     },
   },
 ];
@@ -234,6 +309,7 @@ function makeServer() {
         case 'trakt_watchlist':       result = await getWatchlist(args?.type || 'all'); break;
         case 'trakt_search':          result = await searchTrakt(args.query, args?.type || 'movie,show'); break;
         case 'trakt_recommendations': result = await getTraktRecommendations(args?.type || 'movies'); break;
+        case 'streaming_availability': result = await getAvailability(args.titles); break;
         default: throw new Error(`Herramienta desconocida: ${name}`);
       }
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
