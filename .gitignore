@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.env
+test.mjs
+server.js
+server-stdio.js
+SECRET.txt

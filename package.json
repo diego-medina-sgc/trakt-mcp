@@ -1,0 +1,14 @@
+{
+  "name": "trakt-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server-remote.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  }
+}
